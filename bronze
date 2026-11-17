@@ -1,0 +1,288 @@
+create or replace database bronzedb;
+use bronzedb;
+
+create or replace schema bronze_sch;
+use schema bronze_sch;
+
+-- json
+create or replace stage stg_json
+url = 's3://bronzee-12/iot_events_batch_01.json'
+credentials = (
+    AWS_KEY_ID = '.......'
+    AWS_SECRET_KEY = '..........'
+)
+file_format = (type='json');
+
+desc stage stg_json;
+list @stg_json;
+
+select $1 from @stg_json;
+
+
+create or replace table bronze_json(raw variant);
+
+
+copy into bronze_json
+from @stg_json
+file_format=(type ='json' , strip_outer_array=true);
+
+
+
+select * from bronze_json;
+
+Select
+    f.value:alert_type as Alert_type,
+    f.value:severity as Severity,
+    f.value:triggered_at as Trggered_at,
+    raw:device_id as Device_id,
+    raw:event_id as Event_id,
+    raw:event_type as Event_type,
+    raw:metadata:battery_pct as Battery_pct,
+    raw:metadata:firmware as Firmware,
+    raw:metadata:signal_rssi as SignalRssI
+from bronze_json,
+lateral flatten(input => raw:alerts) as f;
+
+
+-- csv
+
+create or replace stage stg_csv
+url = 's3://bronzee-12/pos_batch_jan_apr.csv'
+credentials = (
+    AWS_KEY_ID = '................'
+    AWS_SECRET_KEY = '....................'
+)
+file_format = (type='csv');
+
+desc stage stg_csv;
+list @stg_csv;
+
+select $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19
+from @stg_csv;
+
+create or replace table bronze_csv(
+    transaction_id varchar(50),
+    store_id varchar(20),
+    store_name varchar(100),
+    store_city varchar(100),
+    store_region varchar(100),
+    cashier_id varchar(20),
+    customer_id varchar(20),
+    transaction_date date,
+    transaction_time time,
+    product_sku varchar(40),
+    product_name varchar(200),
+    category varchar(100),
+    subcategory varchar(100),
+    quantity int,
+    unit_price number(12,2),
+    discount_pct number(5,2),
+    total_amount number(12,2),
+    payment_method varchar(50),
+    loyalty_points number(10,2)
+);
+
+
+
+copy into bronze_csv
+from @stg_csv
+file_format=(type='csv', skip_header = 1)
+on_error='skip_file';
+
+select * from bronze_csv;
+
+
+
+---------------------------------------
+----- silver ----------------
+
+create or replace table silver_csv(
+    transaction_id varchar(50),
+    store_id varchar(20),
+    store_name varchar(100),
+    store_city varchar(100),
+    store_region varchar(100),
+    cashier_id varchar(20),
+    customer_id varchar(20),
+    transaction_date date,
+    transaction_time time,
+    product_sku varchar(40),
+    product_name varchar(200),
+    category varchar(100),
+    subcategory varchar(100),
+    quantity int,
+    unit_price number(12,2),
+    discount_pct number(5,2),
+    total_amount number(12,2),
+    payment_method varchar(50),
+    loyalty_points number(10,2)
+);
+
+select * from silver_csv;
+
+create or replace stream bronze_stream_csv
+on table bronze_csv;
+
+select    
+    transaction_id,
+    store_id,
+    store_name,
+    store_city,
+    store_region,
+    cashier_id,
+    customer_id,
+    transaction_date,
+    transaction_time,
+    product_sku,
+    product_name,
+    category,
+    subcategory,
+    quantity,
+    unit_price,
+    discount_pct,
+    total_amount,
+    payment_method,
+    loyalty_points,
+    metadata$action,
+    metadata$isupdate,
+    metadata$row_id
+from bronze_stream_csv;
+
+
+merge into silver_csv as sc
+using bronze_stream_csv as bsc
+on sc.transaction_id = bsc.transaction_id and sc.product_sku = bsc.product_sku
+when matched
+    and bsc.metadata$action = 'DELETE'
+    and bsc.metadata$isupdate = FALSE
+then delete
+
+when matched
+    and bsc.metadata$action = 'INSERT'
+then update set
+    sc.store_id = bsc.store_id,
+    sc.store_name = bsc.store_name,
+    sc.store_city = bsc.store_city,
+    sc.store_region = bsc.store_region,
+    sc.cashier_id = bsc.cashier_id,
+    sc.customer_id = bsc.customer_id,
+    sc.transaction_date = bsc.transaction_date,
+    sc.transaction_time = bsc.transaction_time,
+    sc.product_name = bsc.product_name,
+    sc.category = bsc.category,
+    sc.subcategory = bsc.subcategory,
+    sc.quantity = bsc.quantity,
+    sc.unit_price = bsc.unit_price,
+    sc.discount_pct = bsc.discount_pct,
+    sc.total_amount = bsc.total_amount,
+    sc.payment_method = bsc.payment_method,
+    sc.loyalty_points = bsc.loyalty_points
+
+when not matched
+    and bsc.METADATA$ACTION = 'INSERT'
+then INSERT (
+    transaction_id,
+    store_id,
+    store_name,
+    store_city,
+    store_region,
+    cashier_id,
+    customer_id,
+    transaction_date,
+    transaction_time,
+    product_sku,
+    product_name,
+    category,
+    subcategory,
+    quantity,
+    unit_price,
+    discount_pct,
+    total_amount,
+    payment_method,
+    loyalty_points)
+VALUES (
+    bsc.transaction_id,
+    bsc.store_id,
+    bsc.store_name,
+    bsc.store_city,
+    bsc.store_region,
+    bsc.cashier_id,
+    bsc.customer_id,
+    bsc.transaction_date,
+    bsc.transaction_time,
+    bsc.product_sku,
+    bsc.product_name,
+    bsc.category,
+    bsc.subcategory,
+    bsc.quantity,
+    bsc.unit_price,
+    bsc.discount_pct,
+    bsc.total_amount,
+    bsc.payment_method,
+    bsc.loyalty_points
+);
+
+
+insert into bronze_csv
+values (
+    'TXN-99999',              
+    'STR-01',                
+    'Downtown Store',        
+    'New York',              
+    'North',                
+    'CAS-105',                
+    'CUST-5012',              
+    '2026-04-01',            
+    '14:30:00',              
+    'SKU-ABC-123',            
+    'Wireless Mouse',        
+    'Electronics',            
+    'Accessories',          
+    2,                        
+    25.50,                    
+    0.00,                    
+    51.00,                    
+    'Credit Card',            
+    15.00                    
+);
+
+update bronze_csv set store_city = 'Jaipur' where transaction_id='TXN-99999';
+
+
+delete from bronze_csv where transaction_id='TXN-99999';
+
+
+-- --------------
+-- csv snowpipe---------
+
+create or replace pipe csv_snowpipe
+    auto_ingest = true
+    as
+    copy into bronze_csv
+    from @stg_csv/csv_data/pos_batch_jan_apr.csv
+    file_format = (type='csv', skip_header=1);
+
+
+    desc pipe csv_snowpipe;
+
+select * from bronze_csv;
+
+----------------
+-- json snowpipe----------
+
+CREATE OR REPLACE PIPE json_snowpipe
+AUTO_INGEST = TRUE
+AS
+COPY INTO bronze_json
+FROM @stg_json/iot_events_batch_01.json
+FILE_FORMAT = (TYPE = 'JSON', STRIP_OUTER_ARRAY = TRUE);
+
+
+DESC PIPE json_snowpipe;
+
+
+SELECT * FROM bronze_json;
+
+----------------------------------------------------------
+-- PROJECT_1 COMPLETE-------------------------------------
+
